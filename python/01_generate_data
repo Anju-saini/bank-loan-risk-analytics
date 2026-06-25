@@ -1,0 +1,144 @@
+"""
+01_generate_data.py
+--------------------
+Generates a realistic SYNTHETIC banking loan dataset for the
+"Credit Risk & Loan Default Analysis" project.
+
+Why synthetic data?
+- No bank will give you real customer data for a portfolio project.
+- Recruiters know this. What they're checking is whether you can handle
+  realistic messy data, do correct SQL/Python analysis, and tell a story.
+- This script creates data with built-in realistic patterns (e.g. higher
+  default rate for low income + high loan amount + low credit score)
+  so your EDA/model actually finds something meaningful, instead of
+  pure random noise.
+
+Output: ../data/loan_data.csv  (10,000 rows)
+"""
+
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+
+np.random.seed(42)
+N = 10000
+
+# ---- Demographics ----
+customer_id = [f"CUST{100000+i}" for i in range(N)]
+age = np.random.randint(21, 65, N)
+gender = np.random.choice(["Male", "Female"], N, p=[0.58, 0.42])
+city = np.random.choice(
+    ["Mumbai", "Delhi", "Bengaluru", "Gurugram", "Chandigarh", "Pune",
+     "Hyderabad", "Chennai", "Noida", "Mohali"],
+    N, p=[0.14, 0.13, 0.12, 0.11, 0.07, 0.10, 0.09, 0.09, 0.08, 0.07]
+)
+
+# ---- Financial profile ----
+annual_income = np.random.gamma(shape=5, scale=140000, size=N).round(-3)
+annual_income = np.clip(annual_income, 150000, 5000000)
+
+employment_type = np.random.choice(
+    ["Salaried", "Self-Employed", "Business Owner"], N, p=[0.62, 0.25, 0.13]
+)
+
+credit_score = np.random.normal(680, 80, N).round().astype(int)
+credit_score = np.clip(credit_score, 300, 900)
+
+existing_loans = np.random.poisson(0.8, N)
+existing_loans = np.clip(existing_loans, 0, 5)
+
+# ---- Loan details ----
+loan_purpose = np.random.choice(
+    ["Home", "Personal", "Auto", "Education", "Business", "Credit Card Consolidation"],
+    N, p=[0.22, 0.28, 0.18, 0.10, 0.14, 0.08]
+)
+
+loan_amount = np.random.gamma(shape=3, scale=180000, size=N).round(-3)
+loan_amount = np.clip(loan_amount, 50000, 8000000)
+
+loan_tenure_months = np.random.choice([12, 24, 36, 48, 60, 84, 120, 180, 240], N,
+                                       p=[0.10, 0.15, 0.20, 0.15, 0.15, 0.10, 0.08, 0.04, 0.03])
+
+interest_rate = np.round(np.random.normal(11.5, 3.0, N), 2)
+interest_rate = np.clip(interest_rate, 7.0, 22.0)
+
+# Loan-to-income ratio (key risk driver)
+loan_to_income = loan_amount / annual_income
+
+# Disbursement date in last 5 years
+start_date = datetime(2021, 1, 1)
+disb_days = np.random.randint(0, 1825, N)
+disbursement_date = [start_date + timedelta(days=int(d)) for d in disb_days]
+
+# ---- Build default probability from realistic risk drivers ----
+# Lower credit score, higher loan-to-income, more existing loans,
+# self-employed/business -> higher default risk
+risk_score = (
+    (900 - credit_score) / 600 * 0.40 +
+    np.clip(loan_to_income, 0, 5) / 5 * 0.30 +
+    (existing_loans / 5) * 0.15 +
+    np.where(employment_type == "Self-Employed", 0.08, 0) +
+    np.where(employment_type == "Business Owner", 0.10, 0) +
+    np.where(loan_purpose == "Credit Card Consolidation", 0.07, 0)
+)
+risk_score = risk_score / risk_score.max()  # normalize 0-1
+default_prob = np.clip(risk_score * 0.85 + np.random.normal(0, 0.01, N), 0.01, 0.95)
+
+is_default = np.random.binomial(1, default_prob)
+
+# ---- Loan status (richer than binary default, useful for Tableau) ----
+loan_status = []
+for d in is_default:
+    if d == 1:
+        loan_status.append(np.random.choice(["Default", "Written Off"], p=[0.75, 0.25]))
+    else:
+        loan_status.append(np.random.choice(["Closed", "Active", "Active - Overdue 30d"],
+                                              p=[0.45, 0.48, 0.07]))
+
+# Days past due (0 for healthy loans, higher for risky ones)
+dpd = np.where(
+    np.array(loan_status) == "Written Off", np.random.randint(120, 365, N),
+    np.where(np.array(loan_status) == "Default", np.random.randint(60, 180, N),
+             np.where(np.array(loan_status) == "Active - Overdue 30d", np.random.randint(1, 45, N), 0))
+)
+
+df = pd.DataFrame({
+    "customer_id": customer_id,
+    "age": age,
+    "gender": gender,
+    "city": city,
+    "employment_type": employment_type,
+    "annual_income": annual_income.astype(int),
+    "credit_score": credit_score,
+    "existing_loans_count": existing_loans,
+    "loan_purpose": loan_purpose,
+    "loan_amount": loan_amount.astype(int),
+    "loan_tenure_months": loan_tenure_months,
+    "interest_rate_pct": interest_rate,
+    "disbursement_date": disbursement_date,
+    "loan_to_income_ratio": loan_to_income.round(2),
+    "days_past_due": dpd,
+    "loan_status": loan_status,
+    "is_default": is_default,
+})
+
+# Add a few realistic data-quality issues (banks' real data is messy!)
+# 1. A few missing incomes
+missing_idx = np.random.choice(df.index, size=80, replace=False)
+df.loc[missing_idx, "annual_income"] = np.nan
+
+# 2. A few duplicate customer rows
+dupes = df.sample(15, random_state=1)
+df = pd.concat([df, dupes], ignore_index=True)
+
+# 3. Inconsistent casing in city for a handful of rows (real-world mess)
+messy_idx = np.random.choice(df.index, size=40, replace=False)
+df.loc[messy_idx, "city"] = df.loc[messy_idx, "city"].str.upper()
+
+import os
+out_path = os.path.join(os.path.dirname(__file__), "..", "data", "loan_data.csv")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+df.to_csv(out_path, index=False)
+print(f"Generated {len(df)} rows -> {out_path}")
+print(df["loan_status"].value_counts())
+print(f"\nOverall default rate: {df['is_default'].mean():.2%}")
