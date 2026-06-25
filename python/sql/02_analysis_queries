@@ -1,0 +1,160 @@
+-- =====================================================================
+-- 02_analysis_queries.sql
+-- Bank Loan Default & Credit Risk Analysis
+-- Works on MySQL / PostgreSQL with minor syntax tweaks noted inline
+-- =====================================================================
+
+-- -------------------------------------------------------
+-- STEP 0: Table creation (if loading raw CSV into a DB)
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS loan_data (
+    customer_id           VARCHAR(20),
+    age                    INT,
+    gender                 VARCHAR(10),
+    city                   VARCHAR(50),
+    employment_type        VARCHAR(30),
+    annual_income          DECIMAL(12,2),
+    credit_score           INT,
+    existing_loans_count   INT,
+    loan_purpose           VARCHAR(40),
+    loan_amount            DECIMAL(12,2),
+    loan_tenure_months     INT,
+    interest_rate_pct      DECIMAL(5,2),
+    disbursement_date      DATE,
+    loan_to_income_ratio   DECIMAL(6,2),
+    days_past_due          INT,
+    loan_status            VARCHAR(30),
+    is_default             INT
+);
+
+-- Load with (MySQL):
+-- LOAD DATA LOCAL INFILE 'loan_data.csv' INTO TABLE loan_data
+-- FIELDS TERMINATED BY ',' ENCLOSED BY '"' LINES TERMINATED BY '\n' IGNORE 1 ROWS;
+
+-- -------------------------------------------------------
+-- STEP 1: Data cleaning view
+-- (removes duplicate customer_id rows, standardizes city casing,
+--  flags missing income for treatment instead of silent NULLs)
+-- -------------------------------------------------------
+CREATE OR REPLACE VIEW vw_loan_clean AS
+SELECT
+    customer_id,
+    age,
+    gender,
+    INITCAP(LOWER(city))                      AS city,          -- Postgres: INITCAP. MySQL: use CONCAT(UPPER(LEFT(city,1)), LOWER(SUBSTRING(city,2)))
+    employment_type,
+    COALESCE(annual_income,
+             (SELECT AVG(annual_income) FROM loan_data WHERE annual_income IS NOT NULL)) AS annual_income,
+    credit_score,
+    existing_loans_count,
+    loan_purpose,
+    loan_amount,
+    loan_tenure_months,
+    interest_rate_pct,
+    disbursement_date,
+    loan_to_income_ratio,
+    days_past_due,
+    loan_status,
+    is_default
+FROM (
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY disbursement_date) AS rn
+    FROM loan_data
+) t
+WHERE rn = 1;   -- de-duplicate
+
+-- -------------------------------------------------------
+-- STEP 2: Headline portfolio KPIs (for dashboard scorecards)
+-- -------------------------------------------------------
+SELECT
+    COUNT(*)                                            AS total_loans,
+    SUM(loan_amount)                                     AS total_disbursed,
+    ROUND(AVG(loan_amount), 0)                           AS avg_loan_amount,
+    ROUND(AVG(credit_score), 0)                          AS avg_credit_score,
+    ROUND(100.0 * SUM(is_default) / COUNT(*), 2)         AS default_rate_pct,
+    SUM(CASE WHEN loan_status = 'Written Off' THEN loan_amount ELSE 0 END) AS amount_written_off
+FROM vw_loan_clean;
+
+-- -------------------------------------------------------
+-- STEP 3: Default rate by credit score band (risk segmentation)
+-- -------------------------------------------------------
+SELECT
+    CASE
+        WHEN credit_score < 580 THEN 'Poor (<580)'
+        WHEN credit_score < 670 THEN 'Fair (580-669)'
+        WHEN credit_score < 740 THEN 'Good (670-739)'
+        WHEN credit_score < 800 THEN 'Very Good (740-799)'
+        ELSE 'Excellent (800+)'
+    END AS credit_band,
+    COUNT(*)                                     AS num_loans,
+    ROUND(100.0 * SUM(is_default) / COUNT(*), 2)  AS default_rate_pct,
+    ROUND(AVG(loan_amount), 0)                    AS avg_loan_amount
+FROM vw_loan_clean
+GROUP BY 1
+ORDER BY MIN(credit_score);
+
+-- -------------------------------------------------------
+-- STEP 4: Default rate by loan purpose and employment type
+-- -------------------------------------------------------
+SELECT
+    loan_purpose,
+    employment_type,
+    COUNT(*)                                     AS num_loans,
+    ROUND(100.0 * SUM(is_default) / COUNT(*), 2)  AS default_rate_pct,
+    ROUND(AVG(loan_to_income_ratio), 2)           AS avg_loan_to_income
+FROM vw_loan_clean
+GROUP BY loan_purpose, employment_type
+ORDER BY default_rate_pct DESC;
+
+-- -------------------------------------------------------
+-- STEP 5: City-level risk concentration (for map viz in Tableau)
+-- -------------------------------------------------------
+SELECT
+    city,
+    COUNT(*)                                      AS num_loans,
+    SUM(loan_amount)                              AS total_disbursed,
+    ROUND(100.0 * SUM(is_default) / COUNT(*), 2)  AS default_rate_pct
+FROM vw_loan_clean
+GROUP BY city
+ORDER BY default_rate_pct DESC;
+
+-- -------------------------------------------------------
+-- STEP 6: Monthly disbursement & default trend (time series)
+-- -------------------------------------------------------
+SELECT
+    DATE_TRUNC('month', disbursement_date) AS month,        -- MySQL: DATE_FORMAT(disbursement_date, '%Y-%m-01')
+    COUNT(*)                                AS loans_disbursed,
+    SUM(loan_amount)                        AS amount_disbursed,
+    ROUND(100.0 * SUM(is_default) / COUNT(*), 2) AS default_rate_pct
+FROM vw_loan_clean
+GROUP BY 1
+ORDER BY 1;
+
+-- -------------------------------------------------------
+-- STEP 7: High-risk customer flag (loan-to-income > 3 AND credit_score < 650)
+-- Useful for a "watchlist" table feeding a Tableau alert view
+-- -------------------------------------------------------
+SELECT
+    customer_id, city, credit_score, loan_amount, loan_to_income_ratio,
+    days_past_due, loan_status
+FROM vw_loan_clean
+WHERE loan_to_income_ratio > 3 AND credit_score < 650
+ORDER BY loan_to_income_ratio DESC;
+
+-- -------------------------------------------------------
+-- STEP 8: Cohort-style aging bucket for active overdue loans
+-- (mirrors real collections/NPA reporting banks use)
+-- -------------------------------------------------------
+SELECT
+    CASE
+        WHEN days_past_due = 0 THEN 'Current'
+        WHEN days_past_due BETWEEN 1 AND 30 THEN '1-30 DPD'
+        WHEN days_past_due BETWEEN 31 AND 60 THEN '31-60 DPD'
+        WHEN days_past_due BETWEEN 61 AND 90 THEN '61-90 DPD'
+        ELSE '90+ DPD (NPA)'
+    END AS dpd_bucket,
+    COUNT(*)            AS num_loans,
+    SUM(loan_amount)     AS exposure_amount
+FROM vw_loan_clean
+GROUP BY 1
+ORDER BY MIN(days_past_due);
