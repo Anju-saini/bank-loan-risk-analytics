@@ -1,0 +1,231 @@
+
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (classification_report, confusion_matrix,
+                              roc_auc_score, roc_curve)
+
+BASE = os.path.dirname(__file__)
+DATA_PATH = os.path.join(BASE, "..", "data", "loan_data.csv")
+OUT_DIR = os.path.join(BASE, "..", "outputs")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+sns.set_style("whitegrid")
+
+# =====================================================================
+# 1. LOAD + CLEAN
+# =====================================================================
+df = pd.read_csv(DATA_PATH, parse_dates=["disbursement_date"])
+print(f"Raw shape: {df.shape}")
+
+# Drop duplicate customers (keep first occurrence)
+df = df.drop_duplicates(subset="customer_id", keep="first")
+
+# Standardize city text
+df["city"] = df["city"].str.strip().str.title()
+
+# Impute missing income with median (robust to outliers vs mean)
+median_income = df["annual_income"].median()
+df["annual_income"] = df["annual_income"].fillna(median_income)
+
+# Recompute loan_to_income in case income was imputed
+df["loan_to_income_ratio"] = (df["loan_amount"] / df["annual_income"]).round(2)
+
+# Credit score band (used in both EDA and as a model feature)
+def credit_band(score):
+    if score < 580: return "Poor"
+    elif score < 670: return "Fair"
+    elif score < 740: return "Good"
+    elif score < 800: return "Very Good"
+    else: return "Excellent"
+
+df["credit_band"] = df["credit_score"].apply(credit_band)
+
+print(f"Clean shape: {df.shape}")
+print(f"Default rate: {df['is_default'].mean():.2%}")
+
+# =====================================================================
+# 2. EDA CHARTS
+# =====================================================================
+
+# 2a. Default rate by credit band
+plt.figure(figsize=(8, 5))
+order = ["Poor", "Fair", "Good", "Very Good", "Excellent"]
+rate_by_band = df.groupby("credit_band")["is_default"].mean().reindex(order) * 100
+sns.barplot(x=rate_by_band.index, y=rate_by_band.values, palette="Reds_r")
+plt.ylabel("Default Rate (%)")
+plt.title("Default Rate by Credit Score Band")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_default_by_credit_band.png"), dpi=150)
+plt.close()
+
+# 2b. Default rate by loan purpose
+plt.figure(figsize=(9, 5))
+rate_by_purpose = df.groupby("loan_purpose")["is_default"].mean().sort_values(ascending=False) * 100
+sns.barplot(x=rate_by_purpose.values, y=rate_by_purpose.index, palette="Blues_r")
+plt.xlabel("Default Rate (%)")
+plt.title("Default Rate by Loan Purpose")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_default_by_purpose.png"), dpi=150)
+plt.close()
+
+# 2c. Loan to income ratio distribution by default status
+plt.figure(figsize=(8, 5))
+sns.boxplot(data=df, x="is_default", y="loan_to_income_ratio")
+plt.xticks([0, 1], ["No Default", "Default"])
+plt.ylim(0, 6)
+plt.title("Loan to Income Ratio: Default vs Non Default")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_lti_boxplot.png"), dpi=150)
+plt.close()
+
+# 2d. Correlation heatmap of numeric features
+plt.figure(figsize=(8, 6))
+numeric_cols = ["age", "annual_income", "credit_score", "existing_loans_count",
+                "loan_amount", "loan_tenure_months", "interest_rate_pct",
+                "loan_to_income_ratio", "days_past_due", "is_default"]
+sns.heatmap(df[numeric_cols].corr(), annot=True, fmt=".2f", cmap="coolwarm", center=0)
+plt.title("Feature Correlation Heatmap")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_correlation_heatmap.png"), dpi=150)
+plt.close()
+
+print("EDA charts saved to /outputs")
+
+# =====================================================================
+# 3. FEATURE ENGINEERING + MODEL
+# =====================================================================
+features_num = ["age", "annual_income", "credit_score", "existing_loans_count",
+                 "loan_amount", "loan_tenure_months", "interest_rate_pct",
+                 "loan_to_income_ratio"]
+features_cat = ["gender", "employment_type", "loan_purpose"]
+
+X = df[features_num + features_cat]
+y = df["is_default"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+preprocessor = ColumnTransformer(transformers=[
+    ("num", StandardScaler(), features_num),
+    ("cat", OneHotEncoder(drop="first", handle_unknown="ignore"), features_cat)
+])
+
+#     Logistic Regression (interpretable baseline)    
+logreg_pipe = Pipeline([
+    ("prep", preprocessor),
+    ("clf", LogisticRegression(max_iter=1000, class_weight="balanced"))
+])
+logreg_pipe.fit(X_train, y_train)
+logreg_probs = logreg_pipe.predict_proba(X_test)[:, 1]
+logreg_preds = logreg_pipe.predict(X_test)
+
+#     Random Forest (better accuracy, feature importance)    
+rf_pipe = Pipeline([
+    ("prep", preprocessor),
+    ("clf", RandomForestClassifier(n_estimators=200, max_depth=8,
+                                    class_weight="balanced", random_state=42))
+])
+rf_pipe.fit(X_train, y_train)
+rf_probs = rf_pipe.predict_proba(X_test)[:, 1]
+rf_preds = rf_pipe.predict(X_test)
+
+# =====================================================================
+# 4. EVALUATION
+# =====================================================================
+print("\n=== Logistic Regression ===")
+print(classification_report(y_test, logreg_preds))
+print(f"ROC AUC: {roc_auc_score(y_test, logreg_probs):.3f}")
+
+print("\n=== Random Forest ===")
+print(classification_report(y_test, rf_preds))
+print(f"ROC AUC: {roc_auc_score(y_test, rf_probs):.3f}")
+
+# ROC curve comparison
+plt.figure(figsize=(7, 6))
+for name, probs in [("Logistic Regression", logreg_probs), ("Random Forest", rf_probs)]:
+    fpr, tpr, _ = roc_curve(y_test, probs)
+    auc = roc_auc_score(y_test, probs)
+    plt.plot(fpr, tpr, label=f"{name} (AUC={auc:.3f})")
+plt.plot([0, 1], [0, 1], linestyle="  ", color="gray")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve   Loan Default Prediction")
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_roc_curve.png"), dpi=150)
+plt.close()
+
+# Confusion matrix for Random Forest (best model)
+cm = confusion_matrix(y_test, rf_preds)
+plt.figure(figsize=(5, 4))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=["No Default", "Default"],
+            yticklabels=["No Default", "Default"])
+plt.ylabel("Actual")
+plt.xlabel("Predicted")
+plt.title("Confusion Matrix   Random Forest")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_confusion_matrix.png"), dpi=150)
+plt.close()
+
+# Feature importance (Random Forest)
+ohe_cols = rf_pipe.named_steps["prep"].named_transformers_["cat"].get_feature_names_out(features_cat)
+all_feature_names = features_num + list(ohe_cols)
+importances = rf_pipe.named_steps["clf"].feature_importances_
+fi_df = pd.DataFrame({"feature": all_feature_names, "importance": importances}) \
+          .sort_values("importance", ascending=False).head(10)
+
+plt.figure(figsize=(8, 5))
+sns.barplot(data=fi_df, x="importance", y="feature", palette="viridis")
+plt.title("Top 10 Feature Importances   Random Forest")
+plt.tight_layout()
+plt.savefig(os.path.join(OUT_DIR, "chart_feature_importance.png"), dpi=150)
+plt.close()
+
+print("\nModel evaluation charts saved to /outputs")
+
+# =====================================================================
+# 5. EXPORT FOR TABLEAU
+# =====================================================================
+# Add model risk scores back onto the FULL dataset for the dashboard
+df["predicted_default_prob"] = rf_pipe.predict_proba(X)[:, 1].round(3)
+df["risk_segment"] = pd.cut(
+    df["predicted_default_prob"],
+    bins=[0, 0.2, 0.4, 0.6, 1.0],
+    labels=["Low Risk", "Medium Risk", "High Risk", "Very High Risk"]
+)
+
+tableau_export_cols = [
+    "customer_id", "age", "gender", "city", "employment_type",
+    "annual_income", "credit_score", "credit_band", "existing_loans_count",
+    "loan_purpose", "loan_amount", "loan_tenure_months", "interest_rate_pct",
+    "disbursement_date", "loan_to_income_ratio", "days_past_due",
+    "loan_status", "is_default", "predicted_default_prob", "risk_segment"
+]
+df[tableau_export_cols].to_csv(os.path.join(OUT_DIR, "loan_data_for_tableau.csv"), index=False)
+
+# Model performance summary (for a dashboard footnote / model card)
+summary = pd.DataFrame({
+    "model": ["Logistic Regression", "Random Forest"],
+    "roc_auc": [round(roc_auc_score(y_test, logreg_probs), 3),
+                round(roc_auc_score(y_test, rf_probs), 3)],
+})
+summary.to_csv(os.path.join(OUT_DIR, "model_performance_summary.csv"), index=False)
+
+print("\nTableau ready files exported:")
+print("   outputs/loan_data_for_tableau.csv")
+print("   outputs/model_performance_summary.csv")
