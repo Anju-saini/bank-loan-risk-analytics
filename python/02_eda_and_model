@@ -24,9 +24,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 sns.set_style("whitegrid")
 
-# =====================================================================
-# 1. LOAD + CLEAN
-# =====================================================================
+
 df = pd.read_csv(DATA_PATH, parse_dates=["disbursement_date"])
 print(f"Raw shape: {df.shape}")
 
