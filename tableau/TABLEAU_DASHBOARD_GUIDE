@@ -1,0 +1,122 @@
+# Tableau Dashboard Build Guide
+## Bank Loan Default & Credit Risk Dashboard
+
+> Note: Tableau (.twbx) is a binary desktop-app file format   it can't be authored directly
+> from code. This guide gives you the exact data source, fields, and chart specs so you can
+> build the real dashboard in Tableau Public/Desktop in ~30-45 minutes. This is also exactly
+> how you should explain your dashboard build process in an interview.
+
+---
+
+## 1. Connect the data source
+
+1. Open Tableau → **Connect to a File → Text File**
+2. Select `outputs/loan_data_for_tableau.csv`
+3. Confirm these field types on load (Tableau usually auto-detects correctly, but check):
+   - `disbursement_date` → **Date**
+   - `is_default` → **Number (whole)**   also create a duplicate as a **Boolean/String** for filters
+   - `credit_score`, `loan_amount`, `annual_income`, `days_past_due` → **Number**
+   - `predicted_default_prob` → **Number (decimal)**
+   - `risk_segment`, `credit_band`, `city`, `loan_purpose`, `employment_type`, `loan_status` → **String (Dimension)**
+
+## 2. Create these calculated fields first
+
+```
+// Default Rate (%)
+SUM([is_default]) / COUNT([customer_id])
+
+// Default Flag (Yes/No)   easier to read in tooltips
+IF [is_default] = 1 THEN "Default" ELSE "No Default" END
+
+// Total Disbursed (formatted helper, optional)
+SUM([loan_amount])
+```
+
+## 3. Build each sheet
+
+### Sheet 1   KPI Scorecards (4 single-value tiles)
+Create 4 separate sheets, each just a Text table / Big Number:
+| Tile | Field/Calc | Format |
+|---|---|---|
+| Total Loans | `COUNTD([customer_id])` | Number, no decimals |
+| Total Disbursed | `SUM([loan_amount])` | ₹ currency, in Crores/Lakhs |
+| Overall Default Rate | `[Default Rate (%)]` | Percentage, 1 decimal |
+| Avg Credit Score | `AVG([credit_score])` | Number, whole |
+
+Tip: Right-click each → Format → increase font to 36-48pt, label below in 12pt grey text.
+
+### Sheet 2   Default Rate by Credit Band (Bar chart)
+- Columns: `credit_band` (sort manually: Poor → Fair → Good → Very Good → Excellent)
+- Rows: `[Default Rate (%)]`
+- Color: `credit_band` using a **red (high risk) → green (low risk)** diverging palette
+- Sort: Descending by default rate
+
+### Sheet 3   Default Rate by Loan Purpose (Horizontal bar)
+- Rows: `loan_purpose`
+- Columns: `[Default Rate (%)]`
+- Sort: Descending
+- Color: single color, intensity by default rate value
+
+### Sheet 4   Risk Segment Distribution (Donut/Pie or Treemap)
+- Use `risk_segment` (Low/Medium/High/Very High Risk)
+- Angle/Size: `COUNTD([customer_id])`
+- Color: Low Risk = green, Medium = yellow, High = orange, Very High = red
+
+### Sheet 5   Geographic Risk Map
+- Double-click `city` (Tableau auto-geocodes Indian cities) → generates Latitude/Longitude
+- Size: `SUM([loan_amount])`
+- Color: `[Default Rate (%)]` (red = high risk)
+- Tooltip: add `city`, num loans (`COUNTD(customer_id)`), default rate
+
+### Sheet 6   Monthly Disbursement & Default Trend (Dual-axis line)
+- Columns: `disbursement_date` (set to **Month** granularity, continuous)
+- Rows (axis 1): `SUM([loan_amount])` → line/area
+- Rows (axis 2): `[Default Rate (%)]` → line, **Dual Axis** (right-click axis → Dual Axis)
+- Synchronize axis: optional, usually leave unsynced since scales differ
+
+### Sheet 7   DPD / Collections Aging Bucket (Bar chart)
+- Create calc field `DPD Bucket`:
+```
+IF [days_past_due] = 0 THEN "Current"
+ELSEIF [days_past_due] <= 30 THEN "1-30 DPD"
+ELSEIF [days_past_due] <= 60 THEN "31-60 DPD"
+ELSEIF [days_past_due] <= 90 THEN "61-90 DPD"
+ELSE "90+ DPD (NPA)"
+END
+```
+- Columns: `DPD Bucket` (sort by custom order shown above)
+- Rows: `SUM([loan_amount])` (exposure at risk)
+- Color: red gradient as buckets worsen
+
+### Sheet 8   High-Risk Customer Watchlist (Table)
+- Filter: `risk_segment` = "High Risk" OR "Very High Risk"
+- Columns: `customer_id`, `city`, `credit_score`, `loan_amount`, `loan_to_income_ratio`, `predicted_default_prob`, `days_past_due`
+- Sort: `predicted_default_prob` descending
+- Conditional formatting on `predicted_default_prob` (red text/background above 0.6)
+
+## 4. Assemble the Dashboard
+1. New Dashboard → set size to **1366 x 768 (Desktop browser)**
+2. Top row: 4 KPI tiles side by side
+3. Second row: Credit Band bar chart (left) + Risk Segment donut (right)
+4. Third row: Geographic map (left, larger) + Monthly trend (right)
+5. Bottom: DPD aging bar chart + High-Risk Watchlist table
+6. Add **Filters** as dashboard actions:
+   - `city` filter (applies to all sheets)   Dashboard → Filters → Apply to Worksheets → All
+   - `loan_purpose` filter
+   - Date range filter on `disbursement_date`
+7. Add a dashboard title: **"Bank Loan Portfolio & Credit Risk Dashboard"**
+8. Set dashboard theme: Format → Workbook theme, or manually apply a navy/white banking color scheme to match your CV branding
+
+## 5. Publish
+- File → Save As → keep as `.twbx` (packaged workbook, bundles the data)
+- Optionally publish to **Tableau Public** (free) to get a shareable link for your resume/LinkedIn
+
+---
+
+## Why this dashboard structure works in interviews
+This mirrors the structure real bank risk/credit dashboards use: portfolio-level KPIs at
+the top, risk drivers in the middle (credit score, purpose, geography), trend monitoring,
+and an actionable watchlist at the bottom. When asked "walk me through this project," you can
+narrate top-to-bottom: **"Here's portfolio health → here's what drives default risk → here's
+the trend → here's who Collections should call first."** That's exactly the kind of narrative
+interviewers want to hear from a Data Analyst.
